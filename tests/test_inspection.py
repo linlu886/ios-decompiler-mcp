@@ -41,7 +41,7 @@ async def test_ui_limits_and_session_scoping(app: Application):
     assert kwargs["depth"] == 8 and kwargs["include_text"] is False
     invalid = await app.tools.invoke("ui_snapshot", {"device_id": "test", "session_id": "process_test", "max_nodes": 100000})
     assert not invalid.ok and invalid.error.code == "INVALID_INPUT"
-    app.frida.sessions["test-session"] = ProcessSession("test-session", "test", "dev.iosdecompiler.fixture", 42, SimpleNamespace())
+    app.frida.sessions["test-session"] = ProcessSession("test-session", "test", "dev.iosdecompiler.fixture", 42, SimpleNamespace(), identity_verified=True)
     with pytest.raises(MCPError):
         app.frida.session("another-device", "test-session")
     app.frida.sessions["test-session"].invalidate("process-exited", app.registry)
@@ -51,7 +51,7 @@ async def test_ui_limits_and_session_scoping(app: Application):
 
 @pytest.mark.asyncio
 async def test_trace_cursor_reports_overflow_and_process_exit(app: Application):
-    session = ProcessSession("test-session", "test", "dev.iosdecompiler.fixture", 42, SimpleNamespace())
+    session = ProcessSession("test-session", "test", "dev.iosdecompiler.fixture", 42, SimpleNamespace(), identity_verified=True)
     app.frida.sessions[session.id] = session
     for i in range(10):
         session.event({"type": "call", "hook_id": "hook1", "index": i, "password": "should never appear"}, 3)

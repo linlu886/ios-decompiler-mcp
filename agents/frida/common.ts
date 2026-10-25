@@ -4,6 +4,7 @@ export type Args = { [key: string]: any };
 export const state = {
   session: "",
   bundle: "",
+  targetKind: "app" as "app" | "process",
   serial: 0,
   disposing: false,
   objects: new Map<string, ObjC.Object>(),
@@ -95,13 +96,14 @@ export function requireRuntime(): void {
 
 // NSBundle is thread-safe Foundation metadata. Cold debugger attachment must
 // not wait for a hung UIKit main queue merely to verify process identity.
-export function processIdentity(): Args {
+export function processIdentity(targetKind = state.targetKind): Args {
+  const identity = { pid: Process.id, architecture: Process.arch, executable: Process.mainModule.path, observed: true };
+  if (targetKind === "process") return identity;
   requireRuntime();
   const pool = ObjC.classes.NSAutoreleasePool.alloc().init();
   try {
     const bundle = ObjC.classes.NSBundle.mainBundle();
-    return { bundle_id: String(bundle.bundleIdentifier()), pid: Process.id,
-      architecture: Process.arch, executable: String(bundle.executablePath()), observed: true };
+    return { ...identity, bundle_id: String(bundle.bundleIdentifier()), executable: String(bundle.executablePath()) };
   } finally { pool.drain(); }
 }
 

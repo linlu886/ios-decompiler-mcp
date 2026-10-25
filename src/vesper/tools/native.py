@@ -6,7 +6,7 @@ from pydantic import Field, model_validator
 
 from vesper.app import Application
 from vesper.config import StrictModel
-from vesper.tools.models import AppRequest
+from vesper.tools.models import TargetRequest, resolve_target
 from vesper.tools.swift import Address
 
 NativeType = Literal['void', 'pointer', 'bool', 'int', 'uint', 'int8', 'uint8', 'int16', 'uint16',
@@ -39,9 +39,9 @@ class Member(StrictModel):
         return self
 
 
-class NativeRequest(AppRequest):
-    action: Literal['symbols', 'inspect', 'read', 'write', 'call', 'trace', 'untrace']
-    module: str | None = Field(default=None, min_length=1, max_length=255)
+class NativeRequest(TargetRequest):
+    action: Literal['modules', 'symbols', 'inspect', 'read', 'write', 'call', 'trace', 'untrace']
+    module: str | None = Field(default=None, min_length=1, max_length=4096)
     symbol: str | None = Field(default=None, min_length=1, max_length=1024)
     address: Address | None = None
     query: str | None = Field(default=None, max_length=255)
@@ -54,7 +54,7 @@ class NativeRequest(AppRequest):
     argument_types: list[NativeType] = Field(default=[], max_length=16)
     arguments: list[int | float | bool | Annotated[str, Field(max_length=128)] | Argument] = Field(default=[], max_length=16)
     return_type: NativeType = 'void'
-    main_thread: bool = True
+    main_thread: bool | None = None
     hook_id: str | None = Field(default=None, max_length=255)
     rate_limit: int = Field(default=10, ge=1, le=100)
     max_events: int = Field(default=100, ge=1, le=1000)
@@ -84,15 +84,18 @@ class NativeRequest(AppRequest):
 
 def register(app: Application) -> None:
     async def native(request: NativeRequest) -> dict[str, Any]:
-        app.permissions.device(request.device_id, request.bundle_id)
-        attached = await app.frida.attach(request.device_id, request.bundle_id)
+        attached = await resolve_target(app, request)
+        arguments = request.model_dump(exclude={'device_id', 'bundle_id', 'session_id'})
+        if arguments['main_thread'] is None:
+            arguments['main_thread'] = attached.get('target_kind', 'app') == 'app'
         result = await app.frida.rpc(request.device_id, attached['session_id'], 'native_runtime',
-            request.model_dump(exclude={'device_id', 'bundle_id'}))
+                                    arguments)
         return {'session_id': attached['session_id'], 'reused': attached.get('reused', False), **result}
 
     app.tools.add('runtime_native', NativeRequest, native,
-        'Bounded native C/C++ symbols, selected fields at known offsets, memory read/write, explicit C ABI calls '
+        'Choose an app bundle_id or an existing session_id. Bounded modules, native C/C++ symbols, selected fields at known offsets, memory read/write, explicit C ABI calls '
         'and argument/return traces. For C++ members supply this as the explicit first pointer argument. '
         'No guessed Swift/C++ ABI or variadic signature. Trace events use frida_get_events; stop with action=untrace. '
         'Return values/addresses are borrowed; C strings supplied as arguments live only through the call. '
-        'main_thread=true by default for UIKit-related calls.', read_only=False)
+        'main_thread defaults to true for apps and false for system process sessions. '
+        'System processes support modules/symbols/inspect/read/trace/untrace off the main queue.', read_only=False)

@@ -68,7 +68,7 @@ Vesper 是一个 iOS 逆向平台，通过结构化 MCP 工具与 Agent Skill �
 
 完整工具与必填字段见[工具参考](docs/TOOLS.md)。
 
-默认 `tool_profile="focused"` 只加载 20 个常用工具；完整 74 个底层能力可通过
+默认 `tool_profile="focused"` 只加载 20 个常用工具；完整 76 个底层能力可通过
 `platform_tool(name=..., action="schema")` 按需查询和调用，也可设为 `"full"`
 直接展示。将 `skills/vesper-ios` 复制到 Agent 的技能目录（Codex 为
 `~/.codex/skills/vesper-ios`），即可按需加载操作流程，减少常驻 schema 和上下文。
@@ -256,6 +256,44 @@ C/C++ 操作要求已知 C ABI 签名，成员调用显式传入 `this` 指针�
 尺寸与缩放按 SSH 连接缓存，朝向刷新；取消会尝试补齐抬指。服务确认不等于目标界面符合预期。
 默认 UIKit/无障碍操作无需新增设备服务，缺失输入后端时 `input_setup` 返回组件安装提示。
 不引入 VNC。按需阅读 [Swift/原生/输入 Skill 指南](skills/vesper-ios/references/swift-native-input.md)。
+
+### 分析白名单系统进程
+
+在设备配置中逐个声明系统目标，路径必须采用这台设备上 Frida 实际报告的完整可执行路径；以下仅为示例：
+
+```toml
+[devices.test.allowed_processes.bluetoothd]
+executable = "/usr/sbin/bluetoothd"
+
+[devices.test.allowed_processes.sharingd]
+executable = "/usr/libexec/sharingd"
+```
+
+通过 `platform_tool` 调用高级工具 `process_list`，读取配置名称对应的当前 PID、路径与
+`path_verified`。`process_attach` 每次重新发现 PID，只附加唯一匹配完整路径的进程，
+再核对 agent 报告的 PID 和主模块路径；身份核对通过后才能使用会话。
+这个入口不会启动或重启系统服务。SSH 中的 `/rootfs` 映射单独处理，不替换进程身份路径。
+
+```json
+{"name":"process_attach","arguments":{"device_id":"test","process_name":"bluetoothd"}}
+```
+
+将返回的 `session_id` 交给原生分析和日志入口，省略 `bundle_id`：
+
+```json
+{"name":"runtime_native","arguments":{"device_id":"test","session_id":"process_SESSION_ID","action":"modules","query":"bluetooth","limit":3}}
+```
+
+系统会话支持模块分页、单模块 `symbols`、指定字段的 `inspect`/限量 `read`、限制速率及次数的
+`trace`。通过 `frida_get_events` 读取事件，用 `untrace` 或 `frida_unhook` 解除 hook。
+`frida_list_hooks` 包含原生 hook。日志使用同一个 `session_id` 调用 `app_logs`，
+建议先选 `sources=["os_log"]` 和较小 `limit`，完成后 `action="stop"`。
+最后 `frida_detach` 清理 hook 并脱离；后续 RPC/事件读取会复查对应白名单。
+系统操作在主队列外执行，无需 UIKit 或 Objective-C 身份；暂不开放写内存、原生调用和 UI/Swift 操作。
+
+最小真机验收为：附加 `bluetoothd`、确认 `identity.executable`、读取少量模块元数据、正常脱离。
+注入权限取决于设备实际环境；失败时返回所处阶段。身份信息来自
+[Frida 官方 Process API](https://frida.re/docs/javascript-api/#process)。
 
 ### 使用底层工具检查应用
 

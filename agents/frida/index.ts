@@ -41,26 +41,35 @@ let sweepPending = false;
 rpc.exports = {
   async dispatch(name: string, args: Args) {
     try {
-      requireRuntime();
       if (name === "initialize") {
         if (state.session) throw new Error("Agent already initialized");
-        const identity = processIdentity();
-        if (identity.bundle_id !== args.bundle_id) throw new Error("Application bundle identity mismatch");
-        state.session = args.session_id; state.bundle = identity.bundle_id;
-        leaseTimer = setInterval(() => {
-          if (sweepPending || state.objects.size === 0) return;
-          sweepPending = true;
-          main(() => expireLeases()).catch(() => {}).finally(() => { sweepPending = false; });
-        }, 1000);
+        const kind = args.target_kind || "app";
+        if (kind !== "app" && kind !== "process") throw new Error("Unknown process target kind");
+        const identity = processIdentity(kind);
+        if (kind === "app" && identity.bundle_id !== args.bundle_id) throw new Error("Application bundle identity mismatch");
+        state.session = args.session_id; state.bundle = identity.bundle_id || ""; state.targetKind = kind;
+        if (kind === "app") {
+          leaseTimer = setInterval(() => {
+            if (sweepPending || state.objects.size === 0) return;
+            sweepPending = true;
+            main(() => expireLeases()).catch(() => {}).finally(() => { sweepPending = false; });
+          }, 1000);
+        }
         return identity;
       }
       if (!state.session) throw new Error("Initialize the process session first");
+      if (state.targetKind === "process") {
+        if (!["identity", "native_runtime", "app_logs", "unhook", "list_hooks", "dispose"].includes(name)) throw new Error("Unsupported system process operation");
+        if (name === "native_runtime" && (!["modules", "symbols", "inspect", "read", "trace", "untrace"].includes(args.action) || args.main_thread)) throw new Error("Unsupported system process native operation");
+      }
       if (name === "swift_capabilities") return { available: Process.arch === "arm64" && Process.platform === "darwin" && !!Process.findModuleByName("libswiftCore.dylib"),
         bridge: "frida-swift-bridge", experimental: true, default_images: [Process.mainModule.name, "libswiftCore.dylib"],
         actions: ["types", "inspect", "call", "trace", "untrace", "release", "reset"],
         limitations: ["Bounded explicitly selected Mach-O images", "Generic/async/stripped signatures may be unsupported", "No automatic pure-Swift heap enumeration", "Struct storage is borrowed; no persistent value handles"] };
       if (name === "native_runtime") return args.main_thread ? await main(() => native.run(args)) : native.run(args);
       if (name === "app_logs") return await logging.run(args);
+      if (name === "unhook") return args.hook_id?.startsWith(state.session + ".native_hook.") ? native.run({ action: "untrace", hook_id: args.hook_id }) : tracer.unhook(args);
+      if (name === "list_hooks") return { hooks: [...tracer.listHooks().hooks, ...native.listHooks().hooks] };
       if (name === "debug_inspect") return debuggerTools.inspect(args);
       if (name === "decrypt_modules") return decrypt.modules();
       if (name === "decrypt_module") return decrypt.dump(args);
@@ -92,6 +101,7 @@ rpc.exports = {
         if (state.objects.size) await main(() => releaseObjects());
         return { disposed: true };
       }
+      requireRuntime();
       if (!methods[name]) throw new Error(`Unknown inspection RPC: ${name}`);
       const queuedAt = Date.now();
       return await main(() => {

@@ -9,7 +9,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from importlib.resources import files
-from typing import Any
+from typing import Any, Literal
 
 from vesper.config import Settings
 from vesper.core.errors import Code, MCPError
@@ -34,8 +34,8 @@ class FridaAdapter:
         self.pins: Counter[tuple[str, str]] = Counter()
 
     @contextmanager
-    def keepalive(self, device_id: str, bundle_id: str) -> Iterator[None]:
-        key = (device_id, bundle_id)
+    def keepalive(self, device_id: str, target: str) -> Iterator[None]:
+        key = (device_id, target)
         self.pins[key] += 1
         try:
             yield
@@ -44,7 +44,7 @@ class FridaAdapter:
             if not self.pins[key]:
                 del self.pins[key]
             for session in self.sessions.values():
-                if (session.device_id, session.bundle_id) == key:
+                if (session.device_id, session.target) == key:
                     session.last_used = time.monotonic()
 
     def _invalidated(self, session: ProcessSession) -> None:
@@ -161,6 +161,24 @@ class FridaAdapter:
         # Only return processes belonging to an explicitly allowed application.
         return [{"pid": app["pid"], "bundle_id": app["bundle_id"], "name": app["name"]} for app in await self.applications(device_id) if app["pid"]]
 
+    async def process_list(self, device_id: str) -> list[dict[str, Any]]:
+        device = await self.device(device_id)
+        allowed = self.settings.devices[device_id].allowed_processes
+        if not allowed:
+            return []
+        try:
+            processes = await self._call(lambda: device.enumerate_processes(scope="metadata"))
+        except MCPError as exc:
+            if exc.code in {Code.FRIDA_ERROR, Code.TIMEOUT}:
+                self.device_lost(device_id)
+            raise
+        # Discovery reports mismatches for configured names, but never grants an
+        # attach on name alone. Do not rewrite /rootfs or canonicalize device paths.
+        return [{"target_kind": "process", "process_name": process.name, "pid": process.pid,
+                 "executable": process.parameters.get("path"), "expected_executable": allowed[process.name].executable,
+                 "path_verified": process.parameters.get("path") == allowed[process.name].executable}
+                for process in processes if process.name in allowed and process.pid > 0]
+
     def compatibility(self, device_id: str, observed_server_version: str | None = None) -> dict[str, Any]:
         host = self.api.__version__
         server = observed_server_version or self.settings.devices[device_id].frida_server_version
@@ -174,20 +192,42 @@ class FridaAdapter:
                 raise MCPError(Code.SESSION_INVALID, "Frida manager is closing")
             return await self._attach(device_id, bundle_id, pid, server_version=server_version)
 
-    async def _attach(self, device_id: str, bundle_id: str, pid: int | None = None, *, server_version: str | None = None) -> dict[str, Any]:
+    async def process_attach(self, device_id: str, process_name: str, *, server_version: str | None = None) -> dict[str, Any]:
+        async with self.attach_lock:
+            if self.closing:
+                raise MCPError(Code.SESSION_INVALID, "Frida manager is closing")
+            return await self._attach(device_id, None, process_name=process_name, server_version=server_version)
+
+    async def _attach(self, device_id: str, bundle_id: str | None, pid: int | None = None, *, process_name: str | None = None, server_version: str | None = None) -> dict[str, Any]:
         config = self.settings.devices.get(device_id)
-        if config is None or bundle_id not in config.allowed_apps:
+        executable = None
+        if process_name is not None:
+            if config is None or process_name not in config.allowed_processes:
+                raise MCPError(Code.NOT_ALLOWED, "Device/process pair is not allowlisted")
+            executable = config.allowed_processes[process_name].executable
+            # Always rediscover, including on reuse: launchd services can restart.
+            candidates = [item for item in await self.process_list(device_id) if item["process_name"] == process_name]
+            matches = [item for item in candidates if item["path_verified"]]
+            if not candidates:
+                raise MCPError(Code.NOT_FOUND, "Allowlisted system process is not running")
+            if len(matches) != 1:
+                raise MCPError(Code.IDENTITY_MISMATCH, "Expected one running process with the exact allowlisted executable path", process_name=process_name)
+            pid = matches[0]["pid"]
+        elif config is None or bundle_id not in config.allowed_apps:
             raise MCPError(Code.NOT_ALLOWED, "Device/application pair is not allowlisted")
+        target_kind: Literal["app", "process"] = "process" if process_name is not None else "app"
         for stale_session in list(self.sessions.values()):
             if not stale_session.active and not stale_session.in_flight and not stale_session.lock.locked():
                 await self.detach(stale_session.device_id, stale_session.id)
         for session in list(self.sessions.values()):
-            if session.active and session.device_id == device_id and session.bundle_id == bundle_id:
-                if not getattr(session.handle, "is_detached", False) and (pid is None or pid == session.pid):
+            if (session.active and session.device_id == device_id and session.target_kind == target_kind
+                    and session.bundle_id == bundle_id and session.process_name == process_name):
+                if (session.identity_verified and not getattr(session.handle, "is_detached", False)
+                        and (pid is None or pid == session.pid) and (target_kind == "app" or session.executable == executable)):
                     session.last_used = time.monotonic()
                     return {**session.metadata(), "reused": True}
                 # Verify an explicit new PID before disposing the old session.
-                if pid is not None and pid != session.pid:
+                if target_kind == "app" and pid is not None and pid != session.pid:
                     observed = next((item for item in await self.applications(device_id) if item["bundle_id"] == bundle_id), None)
                     if not observed or observed["pid"] != pid:
                         raise MCPError(Code.IDENTITY_MISMATCH, "PID does not match the selected application's observed process")
@@ -202,13 +242,15 @@ class FridaAdapter:
             info = await self.probe(device_id)
             server_version = info.get("frida_version")
         compatibility = self.compatibility(device_id, server_version)
-        apps = await self.applications(device_id)
-        app = next((app for app in apps if app["bundle_id"] == bundle_id), None)
-        if not app or not app["pid"]:
-            raise MCPError(Code.NOT_FOUND, "Selected application is not running; launch it explicitly")
-        if pid is not None and pid != app["pid"]:
-            raise MCPError(Code.IDENTITY_MISMATCH, "PID does not match the selected application's observed process")
-        pid = app["pid"]
+        if target_kind == "app":
+            apps = await self.applications(device_id)
+            app = next((app for app in apps if app["bundle_id"] == bundle_id), None)
+            if not app or not app["pid"]:
+                raise MCPError(Code.NOT_FOUND, "Selected application is not running; launch it explicitly")
+            if pid is not None and pid != app["pid"]:
+                raise MCPError(Code.IDENTITY_MISMATCH, "PID does not match the selected application's observed process")
+            pid = app["pid"]
+        assert pid is not None
         agent_path = files("vesper").joinpath("assets/agent.js")
         if not agent_path.is_file():
             raise MCPError(Code.UNAVAILABLE, "Frida agent bundle is missing; run npm ci && npm run build")
@@ -220,7 +262,9 @@ class FridaAdapter:
             exc.details["phase"] = "process_attach"
             raise
         session_id = new_id("process")
-        session = ProcessSession(session_id, device_id, bundle_id, pid, handle, on_invalidate=self._invalidated)
+        session = ProcessSession(session_id, device_id, bundle_id, pid, handle, target_kind=target_kind,
+                                 process_name=process_name, executable=executable, identity_verified=False,
+                                 on_invalidate=self._invalidated)
         self.sessions[session_id] = session
         loop = asyncio.get_running_loop()
 
@@ -253,11 +297,19 @@ class FridaAdapter:
             phase = "script_load"
             await self._call(script.load)
             phase = "agent_initialize"
-            identity = await self._call(lambda: script.exports_sync.dispatch("initialize", {"session_id": session_id, "bundle_id": bundle_id}))
+            identity = await self._call(lambda: script.exports_sync.dispatch("initialize", {
+                "session_id": session_id, "target_kind": target_kind, "bundle_id": bundle_id}))
             if identity.get("agent_error"):
                 raise MCPError(Code.FRIDA_ERROR, identity["agent_error"], agent_code=identity.get("code"))
-            if identity.get("bundle_id") != bundle_id or identity.get("pid") != pid:
-                raise MCPError(Code.IDENTITY_MISMATCH, "Injected process identity does not match selected application")
+            if (identity.get("pid") != pid or (target_kind == "app" and identity.get("bundle_id") != bundle_id)
+                    or (target_kind == "process" and identity.get("executable") != executable)):
+                raise MCPError(Code.IDENTITY_MISMATCH, "Injected process identity does not match the selected target")
+            session.executable = identity.get("executable")
+            session.architecture = identity.get("architecture")
+            self._check_allowlist(session)
+            if not session.active or getattr(handle, "is_detached", False):
+                raise MCPError(Code.SESSION_INVALID, "Process detached during initialization; attach again")
+            session.identity_verified = True
             self.registry.save(session_id, "process_session", session.metadata())
             return {**session.metadata(), "identity": identity, "compatibility": compatibility, "reused": False}
         except BaseException as exc:
@@ -266,12 +318,22 @@ class FridaAdapter:
             await self.detach(device_id, session_id)
             raise
 
+    def _check_allowlist(self, session: ProcessSession) -> None:
+        config = self.settings.devices.get(session.device_id)
+        if session.target_kind == "process":
+            allowed = config.allowed_processes.get(session.process_name or "") if config else None
+            permitted = allowed is not None and allowed.executable == session.executable
+        else:
+            permitted = config is not None and session.bundle_id in config.allowed_apps
+        if not permitted:
+            session.invalidate("allowlist_changed", self.registry)
+            raise MCPError(Code.NOT_ALLOWED, "Device/target pair is no longer allowlisted")
+
     def session(self, device_id: str, session_id: str) -> ProcessSession:
         session = require_session(self.sessions, device_id, session_id)
-        config = self.settings.devices.get(device_id)
-        if config is None or session.bundle_id not in config.allowed_apps:
-            session.invalidate("allowlist_changed", self.registry)
-            raise MCPError(Code.NOT_ALLOWED, "Device/application pair is no longer allowlisted")
+        self._check_allowlist(session)
+        if not session.identity_verified:
+            raise MCPError(Code.SESSION_INVALID, "Process identity has not been verified")
         if getattr(session.handle, "is_detached", False):
             session.invalidate("detached", self.registry)
             raise MCPError(Code.SESSION_INVALID, "Process detached; attach again")
@@ -290,6 +352,12 @@ class FridaAdapter:
     async def _rpc(self, session: ProcessSession, method: str, arguments: dict[str, Any]) -> dict[str, Any]:
         async with session.lock:
             self.session(session.device_id, session.id)
+            if session.target_kind == "process":
+                if method not in {"identity", "native_runtime", "app_logs", "unhook", "list_hooks"}:
+                    raise MCPError(Code.NOT_ALLOWED, "System process sessions support identity, native metadata/trace and logs only")
+                if method == "native_runtime" and (arguments.get("action") not in {"modules", "symbols", "inspect", "read", "trace", "untrace"}
+                                                    or arguments.get("main_thread")):
+                    raise MCPError(Code.NOT_ALLOWED, "System process native operations require the bounded analysis actions off the main queue")
             try:
                 swift = method == 'swift_runtime'
                 if swift and arguments.get('action') == 'reset':
@@ -390,6 +458,9 @@ class FridaAdapter:
         session = self.sessions.get(session_id)
         if session is None or session.device_id != device_id:
             raise MCPError(Code.SESSION_INVALID, "Unknown process session")
+        self._check_allowlist(session)
+        if not session.identity_verified:
+            raise MCPError(Code.SESSION_INVALID, "Process identity has not been verified")
         session.last_used = time.monotonic()
         values = [event for event in session.events if event["sequence"] > after and (hook_id is None or event.get("hook_id") == hook_id)][:limit]
         return {"events": values, "next_sequence": values[-1]["sequence"] if values else after, "dropped": session.dropped, "active": session.active}
@@ -451,7 +522,7 @@ class FridaAdapter:
         async with self.attach_lock:
             now = time.monotonic()
             for session in list(self.sessions.values()):
-                if session.in_flight or session.lock.locked() or self.pins[(session.device_id, session.bundle_id)]:
+                if session.in_flight or session.lock.locked() or self.pins[(session.device_id, session.target)]:
                     continue
                 if not session.active or (self.settings.session_idle_timeout and not session.hooks and now - session.last_used >= self.settings.session_idle_timeout):
                     if session.active:

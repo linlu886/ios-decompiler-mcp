@@ -60,6 +60,18 @@ signatures require LLDB, native registers, or IDA analysis before a typed call.
 
 ## Native C/C++
 
+For configured system processes, load `process_list` / `process_attach` schemas
+and attach by `process_name`. Require an exact `allowed_processes` executable
+match; SSH `/rootfs` paths do not replace the Frida identity. `process_attach`
+rediscovers the PID on each call and returns a host-verified `session_id`.
+Pass that session to `runtime_native` or `app_logs` instead of a `bundle_id`.
+Start with `action="modules"`, a narrow query and `limit=3`; then query symbols in
+one observed image. System sessions permit modules/symbols/inspect/read/trace/untrace
+off the main queue, without UIKit or Objective-C. Native call/write and Swift/UI
+operations remain app-only. Events use `frida_get_events`; remove hooks with
+`untrace` or `frida_unhook`, stop logs with `app_logs(action="stop")`, and detach
+with `frida_detach`. Do not restart a system service to attach.
+
 `runtime_native(action="symbols", module=…, query=…, limit=5)` queries one image;
 private symbols require `include_private=true`. `inspect` takes an observed base
 address and selected `fields=[{name, offset, type}]`. `read`/`write` are explicit

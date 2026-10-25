@@ -57,15 +57,20 @@ function start(args: Args): void {
     append("os_log", level, cString(values[3]), "format");
   });
   if (args.sources.includes("nslog")) {
-    hook("NSLog", "nslog", values => append("nslog", "default", nsString(new ObjC.Object(values[0])), "format"));
-    hook("NSLogv", "nslog", values => {
-      const pool = ObjC.classes.NSAutoreleasePool.alloc().init();
-      let formatted: ObjC.Object | null = null;
-      try {
-        formatted = ObjC.classes.NSString.alloc().initWithFormat_arguments_(new ObjC.Object(values[0]), values[1]);
-        append("nslog", "default", nsString(formatted!), "rendered");
-      } finally { if (formatted) formatted.release(); pool.release(); }
-    });
+    if (!ObjC.available) {
+      unavailable.push("NSLog", "NSLogv");
+      failures.push({ name: "nslog", reason: "Objective-C runtime is unavailable" });
+    } else {
+      hook("NSLog", "nslog", values => append("nslog", "default", nsString(new ObjC.Object(values[0])), "format"));
+      hook("NSLogv", "nslog", values => {
+        const pool = ObjC.classes.NSAutoreleasePool.alloc().init();
+        let formatted: ObjC.Object | null = null;
+        try {
+          formatted = ObjC.classes.NSString.alloc().initWithFormat_arguments_(new ObjC.Object(values[0]), values[1]);
+          append("nslog", "default", nsString(formatted!), "rendered");
+        } finally { if (formatted) formatted.release(); pool.release(); }
+      });
+    }
   }
   if (args.sources.includes("stdio")) {
     const read = (values: InvocationArguments) => {

@@ -48,7 +48,7 @@ class DeploymentService:
             if self.app.theos.fingerprint(build["project_id"]) != build["source_hash"]:
                 raise MCPError(Code.IDENTITY_MISMATCH, "Sources changed after build; rebuild before deployment")
             session = self.app.frida.session(request.device_id, request.session_id)
-            if session.bundle_id != spec["bundle_id"]:
+            if session.target_kind != "app" or session.bundle_id is None or session.bundle_id != spec["bundle_id"]:
                 raise MCPError(Code.IDENTITY_MISMATCH, "Deployment session targets another application")
             device = await self.app.ssh.probe(request.device_id)
             if (device["mode"] == "rootless") != spec["rootless"]:

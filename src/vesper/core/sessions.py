@@ -5,7 +5,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from vesper.core.errors import Code, MCPError
 from vesper.core.evidence import redact
@@ -16,9 +16,14 @@ from vesper.core.registry import Registry
 class ProcessSession:
     id: str
     device_id: str
-    bundle_id: str
+    bundle_id: str | None
     pid: int
     handle: Any
+    target_kind: Literal["app", "process"] = "app"
+    process_name: str | None = None
+    executable: str | None = None
+    architecture: str | None = None
+    identity_verified: bool = False
     script: Any = None
     swift_script: Any = None
     active: bool = True
@@ -32,6 +37,10 @@ class ProcessSession:
     hooks: set[str] = field(default_factory=set)
     on_invalidate: Callable[[ProcessSession], None] | None = None
 
+    @property
+    def target(self) -> str:
+        return self.bundle_id if self.target_kind == "app" and self.bundle_id else f"process:{self.process_name}"
+
     def invalidate(self, reason: str, registry: Registry) -> None:
         if not self.active:
             return
@@ -42,7 +51,10 @@ class ProcessSession:
         registry.save(self.id, "process_session", self.metadata(), "invalidated")
 
     def metadata(self) -> dict[str, Any]:
-        return {"session_id": self.id, "device_id": self.device_id, "bundle_id": self.bundle_id, "pid": self.pid, "reason": self.reason}
+        return {"session_id": self.id, "device_id": self.device_id, "target_kind": self.target_kind,
+                "bundle_id": self.bundle_id, "process_name": self.process_name, "executable": self.executable,
+                "architecture": self.architecture, "identity_verified": self.identity_verified,
+                "pid": self.pid, "reason": self.reason}
 
     def event(self, payload: dict[str, Any], capacity: int) -> None:
         self.sequence += 1

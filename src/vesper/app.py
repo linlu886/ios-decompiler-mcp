@@ -53,14 +53,16 @@ class Application:
         self.maintenance: asyncio.Task[None] | None = None
 
     def operation_scope(self, request: Any) -> contextlib.AbstractContextManager[Any]:
-        device_id, bundle_id = getattr(request, "device_id", None), getattr(request, "bundle_id", None)
+        device_id, target = getattr(request, "device_id", None), getattr(request, "bundle_id", None)
         session = self.frida.sessions.get(getattr(request, "session_id", ""))
         if session:
-            device_id, bundle_id = session.device_id, session.bundle_id
+            device_id, target = session.device_id, session.target
+        elif getattr(request, 'process_name', None):
+            target = f"process:{request.process_name}"
         elif getattr(request, 'deployment_id', None):
             record = self.registry.get(request.deployment_id, 'deployment')
-            device_id, bundle_id = record['device_id'], record['bundle_id']
-        return self.frida.keepalive(device_id, bundle_id) if device_id and bundle_id else contextlib.nullcontext()
+            device_id, target = record['device_id'], record['bundle_id']
+        return self.frida.keepalive(device_id, target) if device_id and target else contextlib.nullcontext()
 
     def start_maintenance(self) -> None:
         if self.maintenance is not None:

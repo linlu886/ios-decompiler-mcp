@@ -38,3 +38,10 @@ download_roots = ["/tmp/vesper"]
 
 # debugserver_path = "/var/jb/usr/bin/debugserver" # auto-detected when omitted
 # debugserver_port = 12345 # loopback-only, carried over SSH
+
+# Optional system process targets: opt in individually after observing the exact
+# Frida-reported executable paths. SSH /rootfs mappings are separate paths.
+# [devices.test.allowed_processes.bluetoothd]
+# executable = "/usr/sbin/bluetoothd"
+# [devices.test.allowed_processes.sharingd]
+# executable = "/usr/libexec/sharingd"

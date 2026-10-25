@@ -5,11 +5,22 @@ from typing import Any
 from pydantic import Field
 
 from vesper.app import Application
-from vesper.tools.models import AppRequest, Empty, MethodRequest, SessionRequest
+from vesper.tools.models import (
+    AppRequest,
+    DeviceRequest,
+    Empty,
+    Identifier,
+    MethodRequest,
+    SessionRequest,
+)
 
 
 class Attach(AppRequest):
     pid: int | None = Field(default=None, ge=1)
+
+
+class ProcessAttach(DeviceRequest):
+    process_name: Identifier
 
 
 class Events(SessionRequest):
@@ -40,6 +51,14 @@ def register(app: Application) -> None:
     async def attach(request: Attach) -> dict[str, Any]:
         app.permissions.device(request.device_id, request.bundle_id)
         return await app.frida.attach(request.device_id, request.bundle_id, request.pid)
+
+    async def process_list(request: DeviceRequest) -> dict[str, Any]:
+        app.permissions.device(request.device_id)
+        return {"processes": await app.frida.process_list(request.device_id)}
+
+    async def process_attach(request: ProcessAttach) -> dict[str, Any]:
+        app.permissions.device(request.device_id)
+        return await app.frida.process_attach(request.device_id, request.process_name)
 
     async def detach(request: SessionRequest) -> dict[str, Any]:
         app.permissions.device(request.device_id)
@@ -76,6 +95,8 @@ def register(app: Application) -> None:
 
     app.tools.add("frida_list_devices", Empty, devices, "Enumerate Frida transports without attaching to any application.")
     app.tools.add("frida_attach", Attach, attach, "Attach a persistent Frida session to a verified allowlisted application PID.")
+    app.tools.add("process_list", DeviceRequest, process_list, "Discover running configured system process names, fresh PIDs and reported executable paths. path_verified=false cannot be attached; paths must exactly match allowed_processes.")
+    app.tools.add("process_attach", ProcessAttach, process_attach, "Rediscover the current PID of an allowed_processes target, verify its reported path, attach and verify agent main-module identity. Returns a persistent session_id for runtime_native, app_logs, frida_get_events, frida_unhook and frida_detach. No spawn or restart.")
     app.tools.add("frida_detach", SessionRequest, detach, "Unload the inspection agent and hooks, then detach.", read_only=False)
     app.tools.add("frida_get_events", Events, events, "Read bounded, redacted trace events by sequence cursor; includes loss count.")
     app.tools.add("frida_hook_method", Hook, hook, "Observe a method's calls without changing arguments or return values. Object contents are never dumped.", read_only=False)

@@ -85,7 +85,7 @@ class FakeFrida:
             if session.active:
                 return session.metadata()
         session_id = f"process_{self.pid}"
-        session = ProcessSession(session_id, device_id, bundle_id, self.pid, SimpleNamespace())
+        session = ProcessSession(session_id, device_id, bundle_id, self.pid, SimpleNamespace(), identity_verified=True)
         self.sessions[session_id] = session
         return session.metadata()
 

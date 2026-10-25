@@ -7,10 +7,10 @@ from pydantic import Field
 
 from vesper.app import Application
 from vesper.core.errors import Code, MCPError
-from vesper.tools.models import AppRequest
+from vesper.tools.models import AppRequest, TargetRequest, resolve_target
 
 
-class Logs(AppRequest):
+class Logs(TargetRequest):
     action: Literal['read', 'start', 'stop'] = 'read'
     after: int = Field(default=0, ge=0)
     limit: int = Field(default=20, ge=1, le=100)
@@ -49,13 +49,13 @@ def register(app: Application) -> None:
 
     async def logs(request: Logs) -> dict[str, Any]:
         app.permissions.device(request.device_id, request.bundle_id)
-        if request.action == 'stop' and not any(session.active and session.device_id == request.device_id and
+        if request.session_id is None and request.action == 'stop' and not any(session.active and session.device_id == request.device_id and
                 session.bundle_id == request.bundle_id and not getattr(session.handle, 'is_detached', False)
                 for session in app.frida.sessions.values()):
             return {'active': False, 'stopped': True}
-        attached = await app.frida.attach(request.device_id, request.bundle_id)
+        attached = await resolve_target(app, request)
         result = await app.frida.rpc(request.device_id, attached['session_id'], 'app_logs',
-                                     request.model_dump(exclude={'device_id', 'bundle_id'}))
+                                     request.model_dump(exclude={'device_id', 'bundle_id', 'session_id'}))
         return {'session_id': attached['session_id'], 'reused': attached.get('reused', False), **result}
 
     async def inspect(request: Inspect) -> dict[str, Any]:
@@ -73,7 +73,7 @@ def register(app: Application) -> None:
         return {'session_id': attached['session_id'], 'reused': attached.get('reused', False), **result}
 
     app.tools.add('app_logs', Logs, logs,
-        'Start/reuse app log hooks and read one filtered page from a bounded on-device ring. '
+        'Choose an app bundle_id or an existing session_id, including system processes. Start/reuse log hooks and read one filtered page from a bounded on-device ring. '
         'Pass after=next_cursor; default 20 entries, no waiting. os_log/NSLog expose format strings; '
         'NSLogv and stdio expose rendered text. Sources/buffer options apply when starting. '
         'Stop removes hooks; an active log stream keeps the session alive.', read_only=False)

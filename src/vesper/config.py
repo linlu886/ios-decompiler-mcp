@@ -2,14 +2,27 @@ from __future__ import annotations
 
 import os
 import tomllib
-from pathlib import Path
-from typing import Literal
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
+
+
+class AllowedProcess(StrictModel):
+    executable: str = Field(min_length=2, max_length=4096)
+
+    @field_validator("executable")
+    @classmethod
+    def executable_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if (not value.startswith("/") or value.startswith("//") or ".." in path.parts
+                or str(path) != value or any(ord(c) < 32 for c in value)):
+            raise ValueError("use the exact absolute normalized process executable path")
+        return value
 
 
 class DeviceConfig(StrictModel):
@@ -19,6 +32,7 @@ class DeviceConfig(StrictModel):
     client_keys: list[Path] = Field(default_factory=list, repr=False)
     known_hosts: Path = Path("~/.ssh/known_hosts")
     allowed_apps: list[str] = Field(default_factory=list)
+    allowed_processes: dict[Annotated[str, Field(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9_.-]+$")], AllowedProcess] = Field(default_factory=dict)
     frida_device_id: str | None = None
     frida_remote: str | None = None
     frida_server_version: str | None = None

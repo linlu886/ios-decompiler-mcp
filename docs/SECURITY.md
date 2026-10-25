@@ -11,9 +11,23 @@ An agent with separate unrestricted access to the operator's filesystem could
 edit approval state directly; the local CLI is a boundary for MCP clients, not
 a sandbox for arbitrary programs running as the operator.
 
-Device IDs and app bundle IDs are explicitly allowlisted. Application discovery
-and process enumeration filter to those apps. Frida attachments validate the
-observed app PID and injected bundle identity. SSH uses key authentication and
+Device IDs, app bundle IDs and system process name/executable pairs are explicitly
+allowlisted. App discovery/enumeration filters to allowed apps. System process
+discovery returns configured names and marks exact path matches; mismatched or
+missing paths cannot be attached. Every system attach rediscovers the current PID
+and requires one exact executable match. Frida attachments validate the observed
+PID plus the injected bundle identity for apps or `Process.mainModule.path` for
+system processes. No RPC/event access is permitted before host identity validation.
+Subsequent RPCs/events recheck the corresponding allowlist, including the exact
+system executable path. Detach remains available for cleanup after revocation.
+Paths are compared as reported by Frida; SSH `/rootfs` mappings are never stripped
+or treated as equivalent executable identities.
+
+System sessions support bounded modules/symbols, selected metadata/memory reads,
+native traces, logs and cleanup, all outside the UIKit main queue. Native writes,
+calls, Swift/Objective-C/UI operations, spawn and restart are outside this interface.
+`runtime_native` and `app_logs` accept exactly one app `bundle_id` or existing
+`session_id`; stale session IDs never trigger an automatic attach. SSH uses key authentication and
 the configured known_hosts file with agent/password/keyboard-interactive auth
 disabled. Shell arguments are quoted from validated semantic inputs; rootless
 tool paths are added explicitly to PATH.

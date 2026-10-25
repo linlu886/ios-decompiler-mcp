@@ -165,7 +165,7 @@ for Codex, Claude Code and Cursor examples.
 The default `tool_profile="focused"` advertises 20 common tools. Advanced
 primitives remain available through `platform_tool`: request one schema with
 `action="schema"`, then call it with `arguments`. `tool_profile="full"` advertises
-all 74 primitives. Copy `skills/vesper-ios` into your agent skill directory
+all 76 primitives. Copy `skills/vesper-ios` into your agent skill directory
 (for Codex, `~/.codex/skills/vesper-ios`) to load workflows on demand.
 
 Structured results are returned once in `structuredContent`, with a short text
@@ -306,6 +306,49 @@ application behavior. The default UIKit/accessibility route needs no new service
 ZXTouch is external, not bundled; `input_setup` returns actionable installation
 hints when unavailable. No VNC is required. See the on-demand
 [Swift/native/input skill guide](skills/vesper-ios/references/swift-native-input.md).
+
+### Inspect allowlisted system processes
+
+Opt in to each system target in your device configuration. Use the exact executable
+path reported by Frida on that device; these paths are examples:
+
+```toml
+[devices.test.allowed_processes.bluetoothd]
+executable = "/usr/sbin/bluetoothd"
+
+[devices.test.allowed_processes.sharingd]
+executable = "/usr/libexec/sharingd"
+```
+
+The advanced `process_list` tool reports fresh PIDs, paths and `path_verified` for
+configured names. `process_attach` rediscovers the PID and requires a unique exact
+path match, then verifies the injected PID and main executable before opening the
+session. It never launches or restarts a service. SSH `/rootfs` mappings are separate
+from process identity and are not rewritten.
+
+```json
+{"name":"process_attach","arguments":{"device_id":"test","process_name":"bluetoothd"}}
+```
+
+Pass the returned `session_id` to native analysis and logs; omit `bundle_id`:
+
+```json
+{"name":"runtime_native","arguments":{"device_id":"test","session_id":"process_SESSION_ID","action":"modules","query":"bluetooth","limit":3}}
+```
+
+`runtime_native` also supports scoped `symbols`, selected `inspect`/`read`, and
+rate/event-limited `trace` on system sessions. Stop a trace with `untrace` or
+`frida_unhook`; read events with `frida_get_events`. Use `app_logs` with the same
+session, `sources=["os_log"]`, a small `limit`, then `action="stop"`.
+`frida_list_hooks` includes native hooks; `frida_detach` removes hooks and detaches.
+Allowlist changes are checked on subsequent RPCs/events. System operations run
+outside the main queue and require neither UIKit nor an Objective-C identity.
+Writes, native calls and UI/Swift operations remain unavailable on system sessions.
+
+Start by attaching `bluetoothd`, inspecting `identity.executable` and a small module
+page, then detaching. Injection availability depends on the device's permissions;
+an attach failure reports its phase. Process identity fields use the
+[official Frida Process API](https://frida.re/docs/javascript-api/#process).
 
 ### Inspect using the lower-level tools
 

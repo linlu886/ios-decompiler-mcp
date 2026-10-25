@@ -62,7 +62,9 @@ async def restart_application(app: Application, device_id: str, bundle_id: str) 
 
 def register(app: Application) -> None:
     async def configured(_: Empty) -> dict[str, Any]:
-        return {"devices": [{"device_id": key, "allowed_apps": device.allowed_apps, "frida_configured": bool(device.frida_device_id or device.frida_remote)} for key, device in app.settings.devices.items()]}
+        return {"devices": [{"device_id": key, "allowed_apps": device.allowed_apps,
+                            "allowed_processes": {name: target.model_dump() for name, target in device.allowed_processes.items()},
+                            "frida_configured": bool(device.frida_device_id or device.frida_remote)} for key, device in app.settings.devices.items()]}
 
     async def connect(request: DeviceRequest) -> dict[str, Any]:
         app.permissions.device(request.device_id)
@@ -114,7 +116,7 @@ def register(app: Application) -> None:
         async with app.deployment_locks.setdefault(request.device_id, asyncio.Lock()):
             return await restart_application(app, request.device_id, request.bundle_id)
 
-    app.tools.add("device_list", Empty, configured, "List configured allowlisted device IDs and applications.")
+    app.tools.add("device_list", Empty, configured, "List configured allowlisted device IDs, applications and system process executables.")
     app.tools.add("device_connect", DeviceRequest, connect, "Connect using pinned SSH host keys and public-key authentication; discover iOS and jailbreak environment.")
     app.tools.add("device_info", DeviceInfo, info, "Get TTL-cached SSH discovery for this connection; force_refresh=true requests fresh architecture, iOS and jailbreak evidence.")
     app.tools.add("device_list_apps", DeviceRequest, apps, "Discover allowlisted installed applications, bundle paths and running PIDs via Frida.")

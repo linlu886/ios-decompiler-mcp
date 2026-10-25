@@ -60,6 +60,13 @@ function registerValue(p: NativePointer, type: string): any {
   return p.toString();
 }
 export function run(args: Args): Args {
+  if (args.action === "modules") {
+    const matches = Process.enumerateModules().filter(m => (!args.module || m.name === args.module || m.path === args.module)
+      && (!args.query || (m.name + " " + m.path).toLowerCase().includes(args.query.toLowerCase())));
+    return { items: matches.slice(args.offset, args.offset + args.limit).map(m => ({ name: m.name, path: m.path,
+      base: m.base.toString(), size: m.size, is_main: m.base.equals(Process.mainModule.base) })),
+      total: matches.length, next_offset: args.offset + args.limit < matches.length ? args.offset + args.limit : null, observed: true };
+  }
   if (args.action === "symbols") {
     const module = Process.getModuleByName(args.module), key = module.base.toString();
     let entries: (ModuleExportDetails | ModuleSymbolDetails)[];
@@ -124,6 +131,9 @@ export function run(args: Args): Args {
     hook.detach(); hooks.delete(args.hook_id); return { hook_id: args.hook_id, active: false };
   }
   throw new Error("Unsupported native action");
+}
+export function listHooks(): Args {
+  return { hooks: Array.from(hooks.keys(), hook_id => ({ hook_id, kind: "native", active: true })) };
 }
 export function dispose(): void {
   for (const hook of hooks.values()) hook.detach(); hooks.clear(); exportsCache.clear();

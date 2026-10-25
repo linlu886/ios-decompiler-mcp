@@ -1,5 +1,5 @@
 📦
-182376 /agents/frida/index.js
+184564 /agents/frida/index.js
 ✄
 // node_modules/frida-objc-bridge/lib/api.js
 var cachedApi = null;
@@ -2848,6 +2848,7 @@ var frida_objc_bridge_default = runtime;
 var state = {
   session: "",
   bundle: "",
+  targetKind: "app",
   serial: 0,
   disposing: false,
   objects: /* @__PURE__ */ new Map(),
@@ -2946,18 +2947,15 @@ function requireRuntime() {
   if (!frida_objc_bridge_default.available)
     throw new Error("Objective-C runtime is unavailable; pure Swift metadata is not reconstructed");
 }
-function processIdentity() {
+function processIdentity(targetKind = state.targetKind) {
+  const identity = { pid: Process.id, architecture: Process.arch, executable: Process.mainModule.path, observed: true };
+  if (targetKind === "process")
+    return identity;
   requireRuntime();
   const pool = frida_objc_bridge_default.classes.NSAutoreleasePool.alloc().init();
   try {
     const bundle = frida_objc_bridge_default.classes.NSBundle.mainBundle();
-    return {
-      bundle_id: String(bundle.bundleIdentifier()),
-      pid: Process.id,
-      architecture: Process.arch,
-      executable: String(bundle.executablePath()),
-      observed: true
-    };
+    return { ...identity, bundle_id: String(bundle.bundleIdentifier()), executable: String(bundle.executablePath()) };
   } finally {
     pool.drain();
   }
@@ -4280,19 +4278,24 @@ function start(args) {
       append("os_log", level, cString(values[3]), "format");
     });
   if (args.sources.includes("nslog")) {
-    hook("NSLog", "nslog", (values) => append("nslog", "default", nsString(new frida_objc_bridge_default.Object(values[0])), "format"));
-    hook("NSLogv", "nslog", (values) => {
-      const pool = frida_objc_bridge_default.classes.NSAutoreleasePool.alloc().init();
-      let formatted = null;
-      try {
-        formatted = frida_objc_bridge_default.classes.NSString.alloc().initWithFormat_arguments_(new frida_objc_bridge_default.Object(values[0]), values[1]);
-        append("nslog", "default", nsString(formatted), "rendered");
-      } finally {
-        if (formatted)
-          formatted.release();
-        pool.release();
-      }
-    });
+    if (!frida_objc_bridge_default.available) {
+      unavailable.push("NSLog", "NSLogv");
+      failures.push({ name: "nslog", reason: "Objective-C runtime is unavailable" });
+    } else {
+      hook("NSLog", "nslog", (values) => append("nslog", "default", nsString(new frida_objc_bridge_default.Object(values[0])), "format"));
+      hook("NSLogv", "nslog", (values) => {
+        const pool = frida_objc_bridge_default.classes.NSAutoreleasePool.alloc().init();
+        let formatted = null;
+        try {
+          formatted = frida_objc_bridge_default.classes.NSString.alloc().initWithFormat_arguments_(new frida_objc_bridge_default.Object(values[0]), values[1]);
+          append("nslog", "default", nsString(formatted), "rendered");
+        } finally {
+          if (formatted)
+            formatted.release();
+          pool.release();
+        }
+      });
+    }
   }
   if (args.sources.includes("stdio")) {
     const read = (values) => {
@@ -4832,6 +4835,21 @@ function registerValue(p, type) {
   return p.toString();
 }
 function run3(args) {
+  if (args.action === "modules") {
+    const matches = Process.enumerateModules().filter((m2) => (!args.module || m2.name === args.module || m2.path === args.module) && (!args.query || (m2.name + " " + m2.path).toLowerCase().includes(args.query.toLowerCase())));
+    return {
+      items: matches.slice(args.offset, args.offset + args.limit).map((m2) => ({
+        name: m2.name,
+        path: m2.path,
+        base: m2.base.toString(),
+        size: m2.size,
+        is_main: m2.base.equals(Process.mainModule.base)
+      })),
+      total: matches.length,
+      next_offset: args.offset + args.limit < matches.length ? args.offset + args.limit : null,
+      observed: true
+    };
+  }
   if (args.action === "symbols") {
     const module = Process.getModuleByName(args.module), key = module.base.toString();
     let entries2;
@@ -4918,6 +4936,9 @@ function run3(args) {
   }
   throw new Error("Unsupported native action");
 }
+function listHooks2() {
+  return { hooks: Array.from(hooks2.keys(), (hook_id) => ({ hook_id, kind: "native", active: true })) };
+}
 function dispose4() {
   for (const hook2 of hooks2.values())
     hook2.detach();
@@ -4957,28 +4978,39 @@ var sweepPending = false;
 rpc.exports = {
   async dispatch(name, args) {
     try {
-      requireRuntime();
       if (name === "initialize") {
         if (state.session)
           throw new Error("Agent already initialized");
-        const identity = processIdentity();
-        if (identity.bundle_id !== args.bundle_id)
+        const kind2 = args.target_kind || "app";
+        if (kind2 !== "app" && kind2 !== "process")
+          throw new Error("Unknown process target kind");
+        const identity = processIdentity(kind2);
+        if (kind2 === "app" && identity.bundle_id !== args.bundle_id)
           throw new Error("Application bundle identity mismatch");
         state.session = args.session_id;
-        state.bundle = identity.bundle_id;
-        leaseTimer = setInterval(() => {
-          if (sweepPending || state.objects.size === 0)
-            return;
-          sweepPending = true;
-          main(() => expireLeases()).catch(() => {
-          }).finally(() => {
-            sweepPending = false;
-          });
-        }, 1e3);
+        state.bundle = identity.bundle_id || "";
+        state.targetKind = kind2;
+        if (kind2 === "app") {
+          leaseTimer = setInterval(() => {
+            if (sweepPending || state.objects.size === 0)
+              return;
+            sweepPending = true;
+            main(() => expireLeases()).catch(() => {
+            }).finally(() => {
+              sweepPending = false;
+            });
+          }, 1e3);
+        }
         return identity;
       }
       if (!state.session)
         throw new Error("Initialize the process session first");
+      if (state.targetKind === "process") {
+        if (!["identity", "native_runtime", "app_logs", "unhook", "list_hooks", "dispose"].includes(name))
+          throw new Error("Unsupported system process operation");
+        if (name === "native_runtime" && (!["modules", "symbols", "inspect", "read", "trace", "untrace"].includes(args.action) || args.main_thread))
+          throw new Error("Unsupported system process native operation");
+      }
       if (name === "swift_capabilities")
         return {
           available: Process.arch === "arm64" && Process.platform === "darwin" && !!Process.findModuleByName("libswiftCore.dylib"),
@@ -4992,6 +5024,10 @@ rpc.exports = {
         return args.main_thread ? await main(() => run3(args)) : run3(args);
       if (name === "app_logs")
         return await run2(args);
+      if (name === "unhook")
+        return args.hook_id?.startsWith(state.session + ".native_hook.") ? run3({ action: "untrace", hook_id: args.hook_id }) : unhook(args);
+      if (name === "list_hooks")
+        return { hooks: [...listHooks().hooks, ...listHooks2().hooks] };
       if (name === "debug_inspect")
         return inspect(args);
       if (name === "decrypt_modules")
@@ -5046,6 +5082,7 @@ rpc.exports = {
           await main(() => releaseObjects());
         return { disposed: true };
       }
+      requireRuntime();
       if (!methods2[name])
         throw new Error(`Unknown inspection RPC: ${name}`);
       const queuedAt = Date.now();
